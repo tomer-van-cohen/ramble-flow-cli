@@ -17,7 +17,7 @@ Ramble Flow has no servers, accounts, analytics or telemetry.
 | --- | --- |
 | Your transcripts folder | One `.txt` per recording: title, recording time with offset, duration, provider/model, a short ID, the transcript. No location, email or source path. |
 | `~/Library/Application Support/Ramble Flow CLI/secrets.env` | Your API key(s), **plaintext**, mode 0600 (readable by your user account and root). |
-| `~/Library/Application Support/Ramble Flow CLI/` | `config.json` (settings, folder paths), `grants.json` (the two folder grants: paths and macOS bookmark data), `jobs.sqlite` (job state, titles, and the text of finished transcripts for 7 days), `Work/` (temporary audio, deleted after export), `status.json`. Folder mode 0700. |
+| `~/Library/Application Support/Ramble Flow CLI/` | `config.json` (settings, folder paths), `grants.json` (the two folder grants: paths and macOS bookmark data), `jobs.sqlite` (job state, titles, and a private copy of the text of each finished transcript, deleted automatically 7 days after it is saved to your folder; text that could not be saved yet is kept until it is), `Work/` (temporary audio, deleted after export), `status.json`. Folder mode 0700. |
 | `~/Library/Logs/Ramble Flow CLI/` | `ramble-flow.log` (rotated at 512 KB, three files), `stdout.log`, `stderr.log`. |
 
 Voice Memos may name recordings after a place when its location-based naming is on; Ramble Flow

@@ -25,7 +25,11 @@ Sandbox**, so it can reach only:
 When you click **Grant Access**, macOS grants the app that folder, and the app saves an
 *app-scoped security-scoped bookmark* (`grants.json`: the folder path plus opaque bookmark data).
 At every later start, including at login from launchd, the app turns the bookmark back into access.
-The recordings folder is bookmarked read-only.
+The recordings folder is bookmarked read-only (`securityScopeAllowOnlyReadAccess`), so from the
+next start on, macOS gives the app read access to it only. The entitlement itself is
+`user-selected.read-write`, because the transcripts folder must be written and the entitlement
+applies to the whole app; in the single run where you click Grant Access, the picked recordings
+folder is briefly read-write to the app, and the code only reads it.
 
 Choosing the folder yourself in the macOS dialog is also what macOS's privacy protection accepts
 for the Voice Memos folder. A program without that grant (or Full Disk Access) gets "Operation not

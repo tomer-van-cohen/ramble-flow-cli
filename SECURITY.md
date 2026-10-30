@@ -25,9 +25,14 @@ transcripts in a report.
 
 - The key is sent only in the `Authorization` header to the fixed HTTPS host of the provider you
   chose (`api.groq.com` or `api.openai.com`). There is no configurable base URL.
-- The background app runs in the App Sandbox. It reaches the recordings folder (read-only bookmark)
-  and the transcripts folder only through the grants you give in the macOS folder dialog, plus its
-  own data and log folders (a sandbox exception). It never needs Full Disk Access. The
+- The background app runs in the App Sandbox. It reaches the recordings folder and the transcripts
+  folder only through the grants you give in the macOS folder dialog, plus its own data and log
+  folders (a sandbox exception). The entitlement for dialog-chosen folders is read-write
+  (`com.apple.security.files.user-selected.read-write`), because the transcripts folder must be
+  written and macOS has one such entitlement for the whole app. The recordings folder is saved as a
+  read-only bookmark (`securityScopeAllowOnlyReadAccess`), so every later start, including at
+  login, gets read access only. During the one run in which you click Grant Access, macOS gives the
+  app read-write access to the folder you picked; the code only reads it. It never needs Full Disk Access. The
   command-line tool inside the bundle (`ramble-flow`) is not sandboxed. It only runs when you start
   it (setup, status) and never touches recordings.
 - Provider error messages are not stored or shown (only machine-readable codes), because they can
