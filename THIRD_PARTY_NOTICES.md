@@ -22,13 +22,11 @@ app by the same author.
 reproducing the geometry and colors of the approved Ramble app-icon master, and the build turns it
 into `AppIcon.icns`. The logo comes from the Ramble product by the same author.
 
-**The logo is not licensed under `LICENSE` (MIT).** All rights are reserved by its owner until
-decided otherwise. **Open decision before public release:** whether the logo may be redistributed
-in a public repository and under which terms (a separate license, a trademark notice, or replacing
-it with a neutral icon for forks).
+**The logo is not licensed under `LICENSE` (MIT).** All rights are reserved by
+Tomer Cohen. You may build and run this repository with it unchanged; forks that publish their
+own builds should replace it with their own icon (`scripts/make-icon.swift`).
 
 ## Names
 
-"Ramble" and "Ramble Flow" are product names of the author. **Open decision before public
-release:** whether the names may be used by forks, and whether a trademark notice is needed.
-They are not licensed under `LICENSE`.
+"Ramble" and "Ramble Flow" are product names of Tomer Cohen and are not licensed under `LICENSE`.
+Forks that publish their own builds should use a different name.

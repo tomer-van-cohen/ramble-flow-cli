@@ -18,7 +18,7 @@ no menu bar item.
 ## Quick start
 
 ```sh
-git clone <repository URL>
+git clone https://github.com/tomer-van-cohen/ramble-flow-cli.git
 cd ramble-flow-cli
 ./install.sh
 ```
@@ -291,6 +291,6 @@ Troubleshooting: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## License
 
-Source code: MIT (see [LICENSE](LICENSE); copyright holder to be confirmed before public release).
+Source code: MIT, copyright Tomer Cohen (see [LICENSE](LICENSE)). The Ramble logo and names are not covered; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 The Ramble logo used as the app icon and the "Ramble" / "Ramble Flow" names are **not** covered by
 the MIT license; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
