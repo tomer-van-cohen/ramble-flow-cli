@@ -1,0 +1,10 @@
+.build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+.DS_Store
+# Runtime output never belongs in the repository
+*.log
+*.sqlite
+secrets.env
