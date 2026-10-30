@@ -3,12 +3,22 @@ import RambleFlowCore
 
 public enum Product {
     public static let name = "Ramble Flow"
-    public static let binaryName = "ramble-flow"
-    /// Reverse-DNS label of the LaunchAgent. Independent of the sandboxed Ramble Flow app, so the
-    /// two never share settings or background jobs.
+    /// Bundle identifier and LaunchAgent label. Independent of the earlier sandboxed Ramble Flow
+    /// window app (`io.github.tomer-van-cohen.ramble-flow`), so the two never share a container,
+    /// settings or grants.
+    public static var bundleIdentifier: String {
+        #if RAMBLE_FLOW_TEST_HOOKS
+        return "io.github.tomer-van-cohen.ramble-flow-cli.test"
+        #else
+        return "io.github.tomer-van-cohen.ramble-flow-cli"
+        #endif
+    }
     public static let defaultLabel = "io.github.tomer-van-cohen.ramble-flow-cli"
-    /// Code-signing identifier given to the locally built binary.
-    public static let signingIdentifier = "io.github.tomer-van-cohen.ramble-flow-cli"
+    public static let appName = "Ramble Flow.app"
+    /// The sandboxed background executable (the bundle's main executable).
+    public static let agentExecutable = "RambleFlow"
+    /// The command-line tool inside the bundle (not sandboxed): setup, status and friends.
+    public static let cliExecutable = "ramble-flow"
     public static let supportFolderName = "Ramble Flow CLI"
     public static let transcriptsFolderName = FolderLocator.destinationFolderName
 
@@ -20,7 +30,7 @@ public enum Product {
         #endif
     }
 
-    static let versionString = "0.1.0"
+    static let versionString = "0.2.0"
 
     public static var testHooksCompiled: Bool {
         #if RAMBLE_FLOW_TEST_HOOKS
@@ -32,26 +42,28 @@ public enum Product {
 }
 
 /// Where everything lives. Derived from `$HOME`, so the whole installation can be exercised
-/// against a temporary home folder. Two environment variables exist for tests and unusual setups:
+/// against a temporary home folder. Environment variables for tests and unusual setups:
 ///
 /// - `RAMBLE_FLOW_LABEL`: LaunchAgent label (launchd's namespace is per user, not per home).
-/// - `RAMBLE_FLOW_BIN_DIR`: folder of the installed binary (default `~/.local/bin`).
+/// - `RAMBLE_FLOW_APP_DIR`: folder of the app bundle (default `~/Applications`).
 public struct InstallLayout: Sendable {
     public var home: URL
     public var label: String
-    public var binary: URL
+    public var app: URL
     public var paths: AppPaths
     public var launchAgents: URL
 
+    public var agent: URL { app.appendingPathComponent("Contents/MacOS/\(Product.agentExecutable)") }
+    public var cli: URL { app.appendingPathComponent("Contents/MacOS/\(Product.cliExecutable)") }
     public var plist: URL { launchAgents.appendingPathComponent("\(label).plist") }
     /// One-shot launchd job used to check access *as the background process*.
     public var probeLabel: String { "\(label).access-probe" }
     public var logFile: URL { paths.logs.appendingPathComponent("ramble-flow.log") }
 
-    public init(home: URL, label: String, binary: URL, paths: AppPaths, launchAgents: URL) {
+    public init(home: URL, label: String, app: URL, paths: AppPaths, launchAgents: URL) {
         self.home = home
         self.label = label
-        self.binary = binary
+        self.app = app
         self.paths = paths
         self.launchAgents = launchAgents
     }
@@ -79,13 +91,13 @@ public struct InstallLayout: Sendable {
         // A build that can talk to a loopback mock must never take the real installation's place.
         guard label.contains(".test") else { throw LayoutError.testBuildNeedsTestLabel }
         #endif
-        let binDir = environment["RAMBLE_FLOW_BIN_DIR"].flatMap { $0.isEmpty ? nil : PathDisplay.expand($0, home: home) }
-            ?? home.appendingPathComponent(".local/bin", isDirectory: true)
+        let appDir = environment["RAMBLE_FLOW_APP_DIR"].flatMap { $0.isEmpty ? nil : PathDisplay.expand($0, home: home) }
+            ?? home.appendingPathComponent("Applications", isDirectory: true)
         let library = home.appendingPathComponent("Library", isDirectory: true)
         let paths = AppPaths(
             root: library.appendingPathComponent("Application Support/\(Product.supportFolderName)", isDirectory: true),
             logs: library.appendingPathComponent("Logs/\(Product.supportFolderName)", isDirectory: true))
-        return InstallLayout(home: home, label: label, binary: binDir.appendingPathComponent(Product.binaryName),
+        return InstallLayout(home: home, label: label, app: appDir.appendingPathComponent(Product.appName, isDirectory: true),
                              paths: paths, launchAgents: library.appendingPathComponent("LaunchAgents", isDirectory: true))
     }
 
@@ -94,7 +106,9 @@ public struct InstallLayout: Sendable {
         func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let values: [(String, String)] = [
             ("RF_LABEL", label),
-            ("RF_BINARY", binary.path),
+            ("RF_APP", app.path),
+            ("RF_CLI", cli.path),
+            ("RF_AGENT", agent.path),
             ("RF_SUPPORT", paths.root.path),
             ("RF_LOGS", paths.logs.path),
             ("RF_PLIST", plist.path),

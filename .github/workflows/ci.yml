@@ -19,14 +19,20 @@ jobs:
           swift --version
       - name: Repository hygiene
         run: ./scripts/check-repo.sh
-      - name: Release build of the program
-        run: swift build -c release --product ramble-flow
+      - name: Release build and app bundle (ad-hoc signed)
+        run: |
+          swift build -c release --product ramble-flow
+          swift build -c release --product RambleFlow
+          mkdir -p .build/ci
+          scripts/make-app.sh --bin-dir "$(swift build -c release --show-bin-path)" --output ".build/ci/Ramble Flow.app"
+          codesign -d --entitlements - ".build/ci/Ramble Flow.app"
       - name: Tests (synthetic audio, mock HTTP; no network calls to providers)
         run: ./scripts/test.sh
 
-  # The end-to-end test loads a LaunchAgent into the runner's GUI session (temporary HOME, unique
-  # .test label, loopback mock provider). Hosted runners have not been verified to provide that
-  # session, so this job does not block merges.
+  # The end-to-end test loads a LaunchAgent into the runner's GUI session (temporary HOME, test
+  # bundle id, unique .test label, loopback mock provider) and launches a sandboxed app through
+  # LaunchServices. Hosted runners have not been verified to provide that session, so this job does
+  # not block merges.
   end-to-end:
     runs-on: macos-15
     continue-on-error: true

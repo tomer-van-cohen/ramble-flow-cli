@@ -18,11 +18,11 @@ public enum CLI {
       logs [-n LINES]        the end of the log
       version
 
-    Set-up commands (used by ./install.sh):
+    Used by ./install.sh:
       setup                  the interactive setup; run ./install.sh instead
-      run                    the background loop (started by the LaunchAgent)
-      probe-access           checks folder access as the background process
-      paths --shell          where everything is installed
+      paths                  where everything is installed
+
+    The background work itself runs in Ramble Flow.app (started at login by a LaunchAgent).
 
     Change settings: run ./install.sh again from your clone. Uninstall: ./install.sh --uninstall.
     """
@@ -34,7 +34,6 @@ public enum CLI {
             return 0
         }
         args.removeFirst()
-        // Commands started by launchd get every path as an argument and need no layout.
         switch command {
         case "help", "-h", "--help":
             print(usage)
@@ -42,14 +41,6 @@ public enum CLI {
         case "version", "--version":
             print("ramble-flow \(Product.version)")
             return 0
-        case "run":
-            guard let root = value(of: "--support-dir", in: args), let logs = value(of: "--log-dir", in: args) else {
-                fputs("usage: ramble-flow run --support-dir DIR --log-dir DIR (started by the LaunchAgent)\n", stderr)
-                return 2
-            }
-            return await Daemon.run(paths: AppPaths(root: URL(fileURLWithPath: root, isDirectory: true), logs: URL(fileURLWithPath: logs, isDirectory: true)))
-        case "probe-access":
-            return probeAccess(args)
         default:
             break
         }
@@ -89,30 +80,6 @@ public enum CLI {
         guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
         return args[index + 1]
     }
-
-    static func probeAccess(_ args: [String]) -> Int32 {
-        guard let source = value(of: "--source", in: args), let destination = value(of: "--destination", in: args) else {
-            fputs("usage: ramble-flow probe-access --source DIR --destination DIR [--output FILE]\n", stderr)
-            return 2
-        }
-        let report = AccessProbe.run(source: URL(fileURLWithPath: source, isDirectory: true), destination: URL(fileURLWithPath: destination, isDirectory: true))
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(report) else { return 1 }
-        if let output = value(of: "--output", in: args) {
-            let url = URL(fileURLWithPath: output)
-            let temporary = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).\(getpid()).tmp")
-            do {
-                try data.write(to: temporary)
-                guard rename(temporary.path, url.path) == 0 else { return 1 }
-            } catch {
-                return 1
-            }
-        } else {
-            FileHandle.standardOutput.write(data + Data("\n".utf8))
-        }
-        return 0
-    }
 }
 
 /// The small management commands. They read the same files as the background process and change
@@ -149,6 +116,8 @@ struct Commands {
                 "language": config.languageHint ?? "auto",
                 "paused": config.paused,
                 "keySaved": savedKey != nil,
+                "sourceGranted": GrantStore(url: paths.grants).current.source != nil,
+                "destinationGranted": GrantStore(url: paths.grants).current.destination != nil,
                 "sourcePath": config.sourcePath ?? NSNull(),
                 "destinationPath": config.destinationPath ?? NSNull(),
             ]
@@ -177,6 +146,7 @@ struct Commands {
             print("  Not set up. Run ./install.sh from your clone.")
             return 1
         }
+        row("App", PathDisplay.tilde(layout.app, home: home))
         var processLine = agent.running ? "running\(agent.pid.map { " (pid \($0))" } ?? "")" : (agent.loaded ? "loaded, not running (last exit \(agent.lastExitStatus ?? "?"))" : "not loaded")
         if installed { processLine += ", starts at login" }
         row("Background process", processLine)
@@ -190,8 +160,13 @@ struct Commands {
         if let permissions, permissions & 0o077 != 0 { keyLine += " — WARNING: secrets.env is readable by others (mode \(String(permissions, radix: 8))); run chmod 600 on it" }
         row("Provider", "\(config.provider.displayName) / \(config.effectiveModel), key \(keyLine)")
         row("Language", config.languageHint ?? "auto")
-        if let path = config.sourcePath { row("Recordings", PathDisplay.tilde(URL(fileURLWithPath: path), home: home)) }
-        if let path = config.destinationPath { row("Transcripts", PathDisplay.tilde(URL(fileURLWithPath: path), home: home)) }
+        let grants = GrantStore(url: paths.grants).current
+        func grantNote(_ grant: FolderGrants.Grant?, _ path: String) -> String {
+            guard let grant else { return " (not granted)" }
+            return GrantedFolders.samePath(grant.path, path) ? " (granted)" : " (granted for another folder)"
+        }
+        if let path = config.sourcePath { row("Recordings", PathDisplay.tilde(URL(fileURLWithPath: path), home: home) + grantNote(grants.source, path)) }
+        if let path = config.destinationPath { row("Transcripts", PathDisplay.tilde(URL(fileURLWithPath: path), home: home) + grantNote(grants.destination, path)) }
         if let activation {
             row("New recordings since", SetupFlow.displayDate(activation.cutoff))
         } else {
@@ -220,10 +195,10 @@ struct Commands {
         case "needsKey": return "needs a valid API key (run ./install.sh)"
         case "credentialsUnreadable": return "cannot read secrets.env"
         case "needsSourceAccess":
-            return detail == "denied" || detail == "scan-failed"
-                ? "cannot read the recordings folder: grant Full Disk Access (run ./install.sh)"
-                : "recordings folder not found"
-        case "needsDestinationAccess": return "cannot write to the transcripts folder"
+            return detail == "missing"
+                ? "recordings folder not found"
+                : "cannot read the recordings folder: run ./install.sh to grant it again"
+        case "needsDestinationAccess": return "cannot write to the transcripts folder: run ./install.sh to grant it again"
         case "outputUnavailable": return "transcripts folder unavailable (Drive offline or folder gone); results wait"
         case "waitingForInternet": return "waiting for the internet"
         case "waitingForProviderLimit": return detail == "quota" ? "provider quota or billing limit reached" : "waiting for the provider's rate limit"

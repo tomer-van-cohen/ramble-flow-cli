@@ -39,19 +39,21 @@ public struct StatusFile: Codable, Equatable, Sendable {
     }
 }
 
-/// `ramble-flow run`: the background process started by the LaunchAgent.
+/// `RambleFlow run`: the background process (the app's sandboxed executable), started by the
+/// LaunchAgent at login and restarted by launchd if it stops unexpectedly.
 public enum Daemon {
     public static func dependencies(paths: AppPaths, store: JobStore, config: ConfigStore, transport: HTTPTransport = URLSessionTransport(),
                                     settings: WorkerSettings = WorkerSettings()) -> WorkerDependencies {
         let uploads = paths.work.appendingPathComponent("uploads", isDirectory: true)
         let scratch = paths.work
+        let folders = GrantedFolders(grants: GrantStore(url: paths.grants))
         return WorkerDependencies(
             store: store, paths: paths, config: config,
             credentials: KeyFileStore(url: paths.secrets),
             audio: AVFoundationAudioPipeline(),
             makeProvider: { id, model in Providers.make(id, model: model, transport: transport, temporaryDirectory: uploads) },
-            sourceFolder: { ConfiguredFolders.source(config.current) },
-            destinationFolder: { ConfiguredFolders.destination(config.current) },
+            sourceFolder: { folders.source(config.current) },
+            destinationFolder: { folders.destination(config.current) },
             metadata: { VoiceMemosMetadata.load(recordingsFolder: $0, scratch: scratch) },
             settings: settings)
     }

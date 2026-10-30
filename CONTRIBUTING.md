@@ -7,13 +7,15 @@ reliably and quietly, from the terminal.
 
 ```sh
 ./scripts/test.sh        # unit and integration tests (synthetic audio, mock HTTP)
-./scripts/e2e.sh         # end-to-end: real launchd agent in a temporary HOME, loopback mock provider
+./scripts/e2e.sh         # end-to-end: real app + launchd agent in a temporary HOME, loopback mock provider
 ./scripts/check-repo.sh  # repository hygiene (no keys, home paths, audio or runtime output)
 ```
 
 Requirements: macOS 14+, Swift 5.10+ (the Command Line Tools are enough). `e2e.sh` takes a few
 minutes (it synthesizes and processes a 62-minute recording) and cleans up after itself: it uses a
-temporary HOME and a unique `.test` LaunchAgent label, and unloads it at the end.
+temporary HOME, a separate test bundle id and a unique `.test` LaunchAgent label, and removes them
+at the end. It cannot click the folder dialog (macOS forbids that for sandboxed apps); it records
+the grants with a test-only helper instead, so the real dialog is a manual test.
 
 ## Ground rules
 

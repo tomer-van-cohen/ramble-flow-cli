@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The background app runs in the App Sandbox: it can reach only the folders you grant. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- Folders chosen in the macOS folder dialog: Voice Memos (bookmarked read-only, never
+         written) and the transcripts folder (written). -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <!-- Remember those grants across launches and logins. -->
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+    <!-- HTTPS to the chosen transcription provider. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Its own settings, API key file, job state and logs, shared with the installer. -->
+    <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+    <array>
+        <string>/Library/Application Support/Ramble Flow CLI/</string>
+        <string>/Library/Logs/Ramble Flow CLI/</string>
+    </array>
+</dict>
+</plist>

@@ -5,7 +5,7 @@ public struct SourceDetection: Equatable, Sendable {
     public enum Status: String, Equatable, Sendable {
         /// The folder exists and can be read now.
         case ready
-        /// The folder exists, but macOS refuses to list it for this process (Full Disk Access).
+        /// The folder exists, but macOS refuses to list it for this process (not granted).
         case needsAccess
         /// No known Voice Memos folder exists (Voice Memos/iCloud may need enabling).
         case notFound

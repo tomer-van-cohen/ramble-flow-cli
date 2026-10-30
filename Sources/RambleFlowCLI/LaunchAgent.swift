@@ -8,10 +8,12 @@ public enum LaunchAgentPlist {
         var plist: [String: Any] = [
             "Label": layout.label,
             "ProgramArguments": [
-                layout.binary.path, "run",
+                layout.agent.path, "run",
                 "--support-dir", layout.paths.root.path,
                 "--log-dir", layout.paths.logs.path,
             ],
+            // Shows "Ramble Flow" (name and icon) in System Settings › Login Items.
+            "AssociatedBundleIdentifiers": [Product.bundleIdentifier],
             "RunAtLoad": true,
             "KeepAlive": ["SuccessfulExit": false],
             "ThrottleInterval": 10,
@@ -23,13 +25,12 @@ public enum LaunchAgentPlist {
         return plist
     }
 
-    /// A one-shot job that runs `ramble-flow probe-access` as launchd would run the agent, so macOS
-    /// privacy protection judges the installed binary itself (not Terminal, which may have its own
-    /// Full Disk Access).
-    public static func probe(layout: InstallLayout, source: String, destination: String, output: URL, extraEnvironment: [String: String] = [:]) -> [String: Any] {
+    /// A one-shot job that runs the app's `probe-access` exactly as launchd runs the background
+    /// process, so the check sees the same sandbox and the same folder grants.
+    public static func probe(layout: InstallLayout, output: URL, extraEnvironment: [String: String] = [:]) -> [String: Any] {
         var plist: [String: Any] = [
             "Label": layout.probeLabel,
-            "ProgramArguments": [layout.binary.path, "probe-access", "--source", source, "--destination", destination, "--output", output.path],
+            "ProgramArguments": [layout.agent.path, "probe-access", "--support-dir", layout.paths.root.path, "--output", output.path],
             "RunAtLoad": true,
             "KeepAlive": false,
             "LaunchOnlyOnce": true,

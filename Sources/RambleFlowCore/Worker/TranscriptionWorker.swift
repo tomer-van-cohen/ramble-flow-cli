@@ -1,7 +1,7 @@
 import Foundation
 
 public enum WorkerError: Error, Equatable {
-    /// The recordings folder cannot be listed ("denied": no Full Disk Access; "missing").
+    /// The recordings folder cannot be listed ("denied": not granted; "missing").
     case sourceUnavailable(String)
 }
 

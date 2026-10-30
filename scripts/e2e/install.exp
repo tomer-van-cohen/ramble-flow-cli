@@ -1,0 +1,50 @@
+#!/usr/bin/expect -f
+# Drives ./install.sh in a real pseudo-terminal, the way a person would: Enter for every default,
+# and the API key typed at the hidden prompt when one is needed.
+#
+#   install.exp <repo> <transcript-log> <api-key|-> <done|canceled>
+#
+#   api-key "-"   press Enter at the key prompt too (a saved key is kept)
+#   done          expect the installer to finish ("Done.")
+#   canceled      expect the folder dialog to be canceled (the test grant helper answers "cancel")
+set timeout 900
+lassign $argv repo transcript key ending
+log_file -noappend $transcript
+cd $repo
+spawn ./install.sh
+
+proc step {pattern answer} {
+    expect {
+        -re $pattern { send -- $answer }
+        timeout { puts "\nE2E: timed out waiting for: $pattern"; exit 1 }
+        eof { puts "\nE2E: installer ended while waiting for: $pattern"; exit 1 }
+    }
+}
+
+step {Provider \[1\]: $} "\r"
+if {$key eq "-"} {
+    step {API key \(typing is hidden\) \[keep [^]]+\]: $} "\r"
+} else {
+    step {API key \(typing is hidden\): $} "$key\r"
+}
+step {Folder \[~/Library/Group Containers/[^]]*\]: $} "\r"
+step {Folder \[[^]]*Ramble Flow\]: $} "\r"
+step {Language \[[a-z]+\]: $} "\r"
+step {Model \[[^]]+\]: $} "\r"
+step {Apply these settings\? \[Y/n\]: $} "\r"
+if {$ending eq "done"} {
+    expect {
+        -re {Done\. Transcripts} {}
+        timeout { puts "\nE2E: no Done"; exit 1 }
+        eof { puts "\nE2E: ended without Done"; exit 1 }
+    }
+} else {
+    expect {
+        -re {You canceled the folder dialog} {}
+        timeout { puts "\nE2E: no cancel message"; exit 1 }
+        eof { puts "\nE2E: ended without the cancel message"; exit 1 }
+    }
+}
+expect eof
+catch wait result
+exit [lindex $result 3]

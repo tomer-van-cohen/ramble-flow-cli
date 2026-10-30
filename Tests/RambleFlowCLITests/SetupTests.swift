@@ -19,7 +19,7 @@ final class FakeHome {
         }
         let library = url.appendingPathComponent("Library")
         layout = InstallLayout(
-            home: url, label: "io.example.ramble-flow-cli.test", binary: url.appendingPathComponent(".local/bin/ramble-flow"),
+            home: url, label: "io.example.ramble-flow-cli.test", app: url.appendingPathComponent("Applications/Ramble Flow.app"),
             paths: AppPaths(root: library.appendingPathComponent("Application Support/Ramble Flow CLI"), logs: library.appendingPathComponent("Logs/Ramble Flow CLI")),
             launchAgents: library.appendingPathComponent("LaunchAgents"))
     }
@@ -51,35 +51,92 @@ final class FakeService: ServiceManager {
     }
 }
 
-/// Answers the access check from a script; by default everything is fine and the probe really
-/// runs in-process against the folders.
+/// Simulates the sandboxed app: a folder is accessible to it only once granted. The access check
+/// reads the same grants.json the real app writes (paths only; bookmarks are not used here).
 final class FakeVerifier: AccessVerifier {
-    var sourceAnswers: [AccessReport.Source]
+    let layout: InstallLayout
+    /// Grants that "stop working" (e.g. an upgrade that invalidated them).
+    var invalidate: Set<String> = []
     private(set) var calls = 0
-    init(_ answers: [AccessReport.Source] = []) { sourceAnswers = answers }
-    func verify(source: URL, destination: URL) -> AccessReport? {
+    init(layout: InstallLayout) { self.layout = layout }
+    func verify() -> AccessReport? {
         calls += 1
-        var report = AccessProbe.run(source: source, destination: destination)
-        if !sourceAnswers.isEmpty { report.source = sourceAnswers.removeFirst() }
+        let config = ConfigStore(url: layout.paths.config).current
+        let grants = GrantStore(url: layout.paths.grants).current
+        var report = AccessReport(source: .notGranted, destination: .notGranted, sandboxed: true)
+        if let path = config.sourcePath {
+            if !PathProbe.isDirectory(URL(fileURLWithPath: path)) { report.source = .missing }
+            else if let g = grants.source, GrantedFolders.samePath(g.path, path) {
+                report.source = invalidate.contains("source") ? .denied : .ok
+                if report.source == .ok { report.recordings = (try? VoiceMemosSource.listRecordings(in: URL(fileURLWithPath: path)))?.count ?? 0 }
+            }
+        }
+        if let path = config.destinationPath, let g = grants.destination, GrantedFolders.samePath(g.path, path) {
+            report.destination = invalidate.contains("destination") ? .denied : (PathProbe.isDirectory(URL(fileURLWithPath: path)) ? .ok : .missing)
+        }
         return report
+    }
+}
+
+/// Plays the folder dialog: grants exactly what was proposed, or what the script says.
+final class FakeGranter: FolderGranter {
+    enum Answer { case accept, cancel, choose(URL) }
+    let layout: InstallLayout
+    var answers: [Answer] = []
+    private(set) var requests: [(source: URL?, destination: URL?)] = []
+    init(layout: InstallLayout) { self.layout = layout }
+
+    func requestGrants(source: URL?, destination: URL?) -> GrantOutcome? {
+        requests.append((source, destination))
+        let store = GrantStore(url: layout.paths.grants)
+        var outcome = GrantOutcome()
+        func next() -> Answer { answers.isEmpty ? .accept : answers.removeFirst() }
+        if let source {
+            switch next() {
+            case .cancel: outcome.source = .init(status: .canceled); return outcome
+            case .accept, .choose:
+                try? store.update { $0.source = FolderGrants.Grant(path: source.path, bookmark: Data([1])) }
+                outcome.source = .init(status: .granted, path: source.path)
+            }
+        }
+        if let destination {
+            var picked = PathProbe.isDirectory(destination) ? destination : destination.deletingLastPathComponent()
+            switch next() {
+            case .cancel: outcome.destination = .init(status: .canceled); return outcome
+            case .choose(let url): picked = url
+            case .accept: break
+            }
+            var target = picked
+            if GrantedFolders.samePath(picked.path, destination.deletingLastPathComponent().path) { target = destination }
+            let created = !PathProbe.isDirectory(target)
+            try? FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+            try? store.update { $0.destination = FolderGrants.Grant(path: target.path, bookmark: Data([2])) }
+            outcome.destination = .init(status: .granted, path: target.path, created: created)
+        }
+        return outcome
     }
 }
 
 final class Harness {
     let home: FakeHome
     let service = FakeService()
-    var verifier = FakeVerifier()
-    var opened: [[String]] = []
+    let verifier: FakeVerifier
+    let granter: FakeGranter
     var keyChecks: [String] = []
     var rejectKeysContaining = "rejected"
     var environment: [String: String] = [:]
     var lastOutput = ""
 
-    init(drive: Bool = false) { home = FakeHome(drive: drive) }
+    init(drive: Bool = false) {
+        home = FakeHome(drive: drive)
+        verifier = FakeVerifier(layout: home.layout)
+        granter = FakeGranter(layout: home.layout)
+    }
 
     var layout: InstallLayout { home.layout }
     var config: AppConfig { ConfigStore(url: layout.paths.config).current }
     var keys: KeyFileStore { KeyFileStore(url: layout.paths.secrets, environment: [:]) }
+    var grants: FolderGrants { GrantStore(url: layout.paths.grants).current }
 
     @discardableResult
     func run(_ inputs: [String], options: SetupOptions = SetupOptions()) async -> (code: Int32, output: String, console: ScriptedConsole) {
@@ -92,8 +149,7 @@ final class Harness {
                 keyChecks.append(key)
                 return key.contains(rejectKeysContaining) ? .rejected("invalid_api_key") : .accepted
             },
-            verifier: verifier, service: service,
-            open: { [self] in opened.append($0) },
+            verifier: verifier, granter: granter, service: service,
             detectSource: { FolderLocator.detectSource(home: home.url) },
             proposeDestination: { FolderLocator.proposeDestination(home: home.url) },
             activationTimeout: 0.2)
@@ -124,13 +180,23 @@ struct SetupTests {
         #expect(try h.keys.fileKey(for: .groq) == groqKey)
         #expect(h.keys.permissions() == 0o600)
         #expect(h.keyChecks == [groqKey])
-        // The transcripts folder was created by the access check, as the background process.
-        #expect(PathProbe.isDirectory(URL(fileURLWithPath: config.destinationPath!)))
+        // Both folders were granted in one round of dialogs, then verified as the background app.
+        #expect(h.granter.requests.count == 1)
+        #expect(h.granter.requests.first?.source?.path == h.home.recordings.path)
+        #expect(h.granter.requests.first?.destination?.path == config.destinationPath)
+        #expect(h.grants.source?.path == h.home.recordings.path)
+        #expect(h.grants.destination?.path == config.destinationPath)
+        #expect(h.verifier.calls == 2)
+        #expect(PathProbe.isDirectory(URL(fileURLWithPath: config.destinationPath!)), "created inside the chosen parent")
+        #expect(result.output.contains("two standard macOS folder dialogs"))
+        #expect(result.output.contains("(a \"Ramble Flow\" folder is created inside)"))
+        #expect(!result.output.contains("Full Disk Access"))
         // LaunchAgent written and started.
         #expect(h.service.bootstraps == [h.layout.label])
         let plist = try #require(NSDictionary(contentsOf: h.layout.plist) as? [String: Any])
         #expect(plist["Label"] as? String == h.layout.label)
-        #expect((plist["ProgramArguments"] as? [String])?.prefix(2) == [h.layout.binary.path, "run"])
+        #expect((plist["ProgramArguments"] as? [String])?.prefix(2) == [h.layout.agent.path, "run"])
+        #expect((plist["AssociatedBundleIdentifiers"] as? [String]) == [Product.bundleIdentifier])
         #expect(plist["RunAtLoad"] as? Bool == true)
         #expect((plist["KeepAlive"] as? [String: Any])?["SuccessfulExit"] as? Bool == false)
         #expect(plist["EnvironmentVariables"] == nil, "a regular build passes no test settings to launchd")
@@ -180,6 +246,7 @@ struct SetupTests {
         #expect(h.service.bootstraps.count == bootstrapsBefore, "settings are picked up live; no restart needed")
         #expect(result.output.contains("picked up the new settings without a restart"))
         #expect(result.output.contains("kept from the first setup"))
+        #expect(h.granter.requests.count == 1, "grants still valid: no dialog on a rerun")
 
         // The next rerun shows "he" as the default.
         let again = await h.run(["", "", "", "", "", "", ""])
@@ -250,30 +317,60 @@ struct SetupTests {
         #expect(h.config.sourcePath == h.home.recordings.path, "declining keeps asking; Enter takes the detected folder")
     }
 
-    @Test func fullDiskAccessIsGuidedAndVerifiedBeforeStarting() async throws {
+    @Test func cancelingTheDialogStartsNothingAndSaysHowToRetry() async throws {
         let h = Harness()
-        h.verifier = FakeVerifier([.denied, .denied])
-        let result = await h.run(["", groqKey, "", "", "", "", "", "", "x", ""], options: SetupOptions(binaryChanged: true))
-        #expect(result.code == 0, "\(result.output)")
-        #expect(h.verifier.calls == 3)
-        #expect(h.opened.first == [SetupFlow.fullDiskAccessURL])
-        #expect(h.opened.dropFirst().first == ["-R", h.layout.binary.path])
-        #expect(result.output.contains("not permitted (macOS privacy protection)"))
-        #expect(result.output.contains("remove it with the − button first"))
-        #expect(result.output.contains("Still no access"))
-        #expect(result.output.contains("Press Enter, s or o."))
-        #expect(result.output.contains("Recordings folder    ok"))
+        h.granter.answers = [.cancel]
+        let result = await h.run(["", groqKey, "", "", "", "", ""])
+        #expect(result.code == 1)
+        #expect(result.output.contains("You canceled the folder dialog"))
+        #expect(result.output.contains("Run ./install.sh again"))
+        #expect(h.service.bootstraps.isEmpty, "nothing is started without both grants")
+        #expect(!h.config.setupCompleted)
+        #expect(try h.keys.fileKey(for: .groq) == groqKey, "answers are kept for the next run")
+        // Next run: Enter everywhere, the dialog appears again, then everything starts.
+        let again = await h.run(["", "", "", "", "", "", ""])
+        #expect(again.code == 0, "\(again.output)")
+        #expect(h.granter.requests.count == 2)
         #expect(h.service.bootstraps == [h.layout.label])
     }
 
-    @Test func permissionStepCanBeSkipped() async throws {
+    @Test func invalidatedGrantAfterAnUpgradeShowsTheDialogAgain() async throws {
         let h = Harness()
-        h.verifier = FakeVerifier([.denied])
-        let result = await h.run(["", groqKey, "", "", "", "", "", "s"])
-        #expect(result.code == 0)
-        #expect(result.output.contains("Skipped."))
-        #expect(h.config.setupCompleted, "it starts and waits for access; nothing is uploaded meanwhile")
-        #expect(result.output.contains("starts watching once it can read the recordings folder"))
+        _ = await h.run(["", groqKey, "", "", "", "", ""])
+        #expect(h.granter.requests.count == 1)
+        // A rebuild made the recordings grant unusable: only that folder is asked for again.
+        h.verifier.invalidate = ["source"]
+        h.granter.answers = [.accept]
+        let result = await h.run(["", "", "", "", "", "", "", "q"], options: SetupOptions(binaryChanged: true))
+        #expect(result.output.contains("no longer granted"))
+        #expect(h.granter.requests.count == 2)
+        #expect(h.granter.requests.last?.source != nil)
+        #expect(h.granter.requests.last?.destination == nil)
+        // Still invalid in this fake, so the user is offered another try; "q" stops cleanly.
+        #expect(result.output.contains("Access still does not work"))
+        #expect(result.code == 1)
+    }
+
+    @Test func choosingAnotherTranscriptsFolderInTheDialogIsFollowed() async throws {
+        let h = Harness()
+        let other = h.home.url.appendingPathComponent("Notes")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        h.granter.answers = [.accept, .choose(other)]
+        let result = await h.run(["", groqKey, "", "", "", "", ""])
+        #expect(result.code == 0, "\(result.output)")
+        #expect(h.config.destinationPath == other.path)
+        #expect(result.output.contains("Transcripts folder is now ~/Notes"))
+        #expect(result.output.contains("appear in ~/Notes"))
+    }
+
+    @Test func missingVoiceMemosFolderStopsWithAdvice() async throws {
+        let h = Harness()
+        try FileManager.default.removeItem(at: h.home.recordings)
+        let result = await h.run(["", groqKey, "", "", "", "", ""])
+        #expect(result.code == 1)
+        #expect(result.output.contains("Turn on iCloud for Voice Memos"))
+        #expect(h.granter.requests.isEmpty)
+        #expect(h.service.bootstraps.isEmpty)
     }
 
     @Test func endOfInputStopsWithoutChangingAnything() async throws {
@@ -306,46 +403,74 @@ struct AgentTests {
         #expect(stopped.lastExitStatus == "1")
     }
 
-    @Test func probeReportsCountsWithoutNamesAndCreatesTheFolder() throws {
+    @Test func probeWithoutGrantsReportsNotGranted() throws {
         let home = FakeHome()
-        try Data().write(to: home.recordings.appendingPathComponent("20261030 101010-AAAA0001.m4a"))
-        try Data().write(to: home.recordings.appendingPathComponent("20261030 101010-AAAA0001.waveform"))
-        let destination = home.url.appendingPathComponent("Documents/Ramble Flow")
-        let report = AccessProbe.run(source: home.recordings, destination: destination)
-        #expect(report == AccessReport(source: .ok, recordings: 1, destination: .ok, destinationCreated: true))
-        #expect(try FileManager.default.contentsOfDirectory(atPath: destination.path).isEmpty, "the write check leaves nothing behind")
-        let json = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
-        #expect(!json.contains("AAAA0001"))
+        try home.layout.paths.createDirectories()
+        try ConfigStore(url: home.layout.paths.config).update {
+            $0.sourcePath = home.recordings.path
+            $0.destinationPath = home.url.appendingPathComponent("Documents/Ramble Flow").path
+        }
+        let report = AccessProbe.run(paths: home.layout.paths)
+        #expect(report.source == .notGranted)
+        #expect(report.destination == .notGranted)
+        #expect(!report.allOK)
     }
 
-    @Test func probeTellsDeniedMissingAndUnwritableApart() throws {
-        guard getuid() != 0 else { return }
+    @Test func probeJobRunsTheAppInsideItsSandbox() throws {
         let home = FakeHome()
-        chmod(home.recordings.path, 0o000)
-        let missingDrive = home.url.appendingPathComponent("Library/CloudStorage/GoogleDrive-x/My Drive/Ramble Flow")
-        var report = AccessProbe.run(source: home.recordings, destination: missingDrive)
-        #expect(report.source == .denied)
-        #expect(report.destination == .missing)
-        chmod(home.recordings.path, 0o755)
-        let readOnly = home.url.appendingPathComponent("Documents")
-        chmod(readOnly.path, 0o555)
-        report = AccessProbe.run(source: home.url.appendingPathComponent("nope"), destination: readOnly.appendingPathComponent("Ramble Flow"))
-        #expect(report.source == .missing)
-        #expect(report.destination == .denied || report.destination == .notWritable)
-    }
-
-    @Test func probeJobRunsTheInstalledBinaryWithoutOutputNoise() throws {
-        let home = FakeHome()
-        let plist = LaunchAgentPlist.probe(layout: home.layout, source: "/a", destination: "/b", output: URL(fileURLWithPath: "/tmp/out.json"))
+        let plist = LaunchAgentPlist.probe(layout: home.layout, output: URL(fileURLWithPath: "/tmp/out.json"))
         #expect(plist["Label"] as? String == home.layout.label + ".access-probe")
-        #expect((plist["ProgramArguments"] as? [String]) == [home.layout.binary.path, "probe-access", "--source", "/a", "--destination", "/b", "--output", "/tmp/out.json"])
+        #expect((plist["ProgramArguments"] as? [String]) == [home.layout.agent.path, "probe-access", "--support-dir", home.layout.paths.root.path, "--output", "/tmp/out.json"])
         #expect(plist["KeepAlive"] as? Bool == false)
+        #expect(home.layout.agent.path.hasSuffix("Ramble Flow.app/Contents/MacOS/RambleFlow"))
+        #expect(home.layout.cli.path.hasSuffix("Ramble Flow.app/Contents/MacOS/ramble-flow"))
+    }
+
+    @Test func grantRecorderCreatesTheFolderInsideTheChosenParent() throws {
+        let home = FakeHome()
+        try home.layout.paths.createDirectories()
+        let store = GrantStore(url: home.layout.paths.grants)
+        let intended = home.url.appendingPathComponent("Documents/Ramble Flow")
+        let answer = GrantRecorder.recordDestination(picked: home.url.appendingPathComponent("Documents"), intended: intended, grants: store)
+        #expect(answer.status == .granted)
+        #expect(answer.created)
+        #expect(answer.path == intended.standardizedFileURL.path)
+        #expect(PathProbe.isDirectory(intended))
+        #expect(store.current.destination?.path == intended.standardizedFileURL.path)
+        #expect(!(store.current.destination?.bookmark.isEmpty ?? true))
+        // Choosing an unrelated folder makes it the transcripts folder as is.
+        let other = home.url.appendingPathComponent("Elsewhere")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let second = GrantRecorder.recordDestination(picked: other, intended: intended, grants: store)
+        #expect(second.path == other.standardizedFileURL.path)
+        #expect(!second.created)
+        let source = GrantRecorder.recordSource(picked: home.recordings, grants: store)
+        #expect(source.status == .granted)
+        #expect(store.current.source?.path == home.recordings.standardizedFileURL.path)
+        let mode = (try FileManager.default.attributesOfItem(atPath: home.layout.paths.grants.path)[.posixPermissions] as? NSNumber)?.intValue
+        #expect(mode == 0o600)
+    }
+
+    @Test func grantsResolveToTheGrantedFoldersOnly() throws {
+        let home = FakeHome()
+        try home.layout.paths.createDirectories()
+        let store = GrantStore(url: home.layout.paths.grants)
+        _ = GrantRecorder.recordSource(picked: home.recordings, grants: store)
+        let folders = GrantedFolders(grants: store)
+        var config = AppConfig()
+        config.sourcePath = home.recordings.path
+        guard case .available = folders.source(config) else { Issue.record("granted folder should resolve"); return }
+        config.sourcePath = home.url.appendingPathComponent("Documents").path
+        guard case .notGranted("grant-for-another-folder") = folders.source(config) else { Issue.record("other folder"); return }
+        config.sourcePath = nil
+        guard case .notGranted("not-configured") = folders.source(config) else { Issue.record("unconfigured"); return }
+        guard case .notGranted("no-grant") = folders.destination({ var c = AppConfig(); c.destinationPath = "/x"; return c }()) else { Issue.record("no grant"); return }
     }
 
     @Test func layoutDerivesEverythingFromHomeAndLabel() throws {
-        let layout = try InstallLayout.standard(environment: ["RAMBLE_FLOW_LABEL": "io.example.ramble.test-1", "RAMBLE_FLOW_BIN_DIR": "/tmp/rf-bin"])
+        let layout = try InstallLayout.standard(environment: ["RAMBLE_FLOW_LABEL": "io.example.ramble.test-1", "RAMBLE_FLOW_APP_DIR": "/tmp/rf-apps"])
         #expect(layout.label == "io.example.ramble.test-1")
-        #expect(layout.binary.path == "/tmp/rf-bin/ramble-flow")
+        #expect(layout.app.path == "/tmp/rf-apps/Ramble Flow.app")
         #expect(layout.plist.lastPathComponent == "io.example.ramble.test-1.plist")
         #expect(layout.paths.root.path.hasSuffix("Library/Application Support/Ramble Flow CLI"))
         #expect(layout.paths.logs.path.hasSuffix("Library/Logs/Ramble Flow CLI"))

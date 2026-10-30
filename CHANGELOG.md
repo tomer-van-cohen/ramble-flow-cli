@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- The background work now runs in a tiny sandboxed app, `~/Applications/Ramble Flow.app`, with no
+  UI (no Dock icon, menu bar item or window). Full Disk Access is gone: after the questions, the
+  installer shows the standard macOS folder dialog for the recordings folder and the transcripts
+  folder (click Grant Access), stores the grants as security-scoped bookmarks, and verifies them as
+  the background app before starting it.
+- Canceling the dialog starts nothing and says how to retry. A grant that stops working (for
+  example after an upgrade) makes the installer show the dialog again.
+- `./install.sh --status`. The command-line tool lives inside the app; an earlier
+  `~/.local/bin/ramble-flow` is removed (settings and key kept).
+- The app icon is the Ramble logo (not MIT-licensed; see THIRD_PARTY_NOTICES.md).
+
 ## 0.1.0 (unreleased)
 
 First terminal-only version.

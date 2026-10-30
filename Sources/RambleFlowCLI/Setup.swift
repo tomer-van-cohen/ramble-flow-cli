@@ -7,17 +7,18 @@ public struct SetupContext {
     public var console: Console
     public var credentials: KeyFileStore
     public var keyCheck: (ProviderID, String) async -> KeyCheck
+    /// Checks folder access as the background app (launchd one-shot job).
     public var verifier: AccessVerifier
+    /// Shows the native folder dialog(s) through Ramble Flow.app.
+    public var granter: FolderGranter
     public var service: ServiceManager
-    /// Runs `/usr/bin/open` with these arguments (System Settings, Finder).
-    public var open: ([String]) -> Void
     public var detectSource: () -> SourceDetection
     public var proposeDestination: () -> DestinationProposal
     /// How long to wait for the background process to establish the cutoff.
     public var activationTimeout: TimeInterval
 
     public init(layout: InstallLayout, console: Console, credentials: KeyFileStore, keyCheck: @escaping (ProviderID, String) async -> KeyCheck,
-                verifier: AccessVerifier, service: ServiceManager, open: @escaping ([String]) -> Void,
+                verifier: AccessVerifier, granter: FolderGranter, service: ServiceManager,
                 detectSource: @escaping () -> SourceDetection, proposeDestination: @escaping () -> DestinationProposal,
                 activationTimeout: TimeInterval = 30) {
         self.layout = layout
@@ -25,45 +26,33 @@ public struct SetupContext {
         self.credentials = credentials
         self.keyCheck = keyCheck
         self.verifier = verifier
+        self.granter = granter
         self.service = service
-        self.open = open
         self.detectSource = detectSource
         self.proposeDestination = proposeDestination
         self.activationTimeout = activationTimeout
     }
 
-    /// The real thing: Terminal, launchd, System Settings, the provider's key check.
+    /// The real thing: Terminal, launchd, Ramble Flow.app's folder dialog, the provider's key check.
     public static func standard(layout: InstallLayout, environment: [String: String] = ProcessInfo.processInfo.environment) -> SetupContext {
         let service = Launchctl()
         let transport = URLSessionTransport()
         let uploads = layout.paths.work.appendingPathComponent("uploads", isDirectory: true)
-        let noOpen = environment["RAMBLE_FLOW_NO_OPEN"] == "1"
-        let console = StandardConsole()
         return SetupContext(
-            layout: layout, console: console,
+            layout: layout, console: StandardConsole(),
             credentials: KeyFileStore(url: layout.paths.secrets, environment: environment),
             keyCheck: { id, key in await Providers.make(id, model: id.defaultModel, transport: transport, temporaryDirectory: uploads).checkKey(key) },
             verifier: LaunchdAccessVerifier(layout: layout, service: service),
+            granter: AppFolderGranter(layout: layout, environment: environment),
             service: service,
-            open: { arguments in
-                if noOpen {
-                    console.line("     (RAMBLE_FLOW_NO_OPEN=1, not running: open \(arguments.joined(separator: " ")))")
-                    return
-                }
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                process.arguments = arguments
-                try? process.run()
-                process.waitUntilExit()
-            },
             detectSource: { FolderLocator.detectSource(home: layout.home) },
             proposeDestination: { FolderLocator.proposeDestination(home: layout.home) })
     }
 }
 
 public struct SetupOptions: Equatable {
-    /// The installer replaced the binary with a different build (macOS ties Full Disk Access to
-    /// the exact build, so it has to be granted again).
+    /// The installer replaced the app with a different build: restart the background process.
+    /// (Folder grants usually survive a rebuild; if not, the access check shows the dialog again.)
     public var binaryChanged = false
     public var skipKeyCheck = false
     public init(binaryChanged: Bool = false, skipKeyCheck: Bool = false) {
@@ -81,7 +70,6 @@ public final class SetupFlow {
     var console: Console { ctx.console }
     var layout: InstallLayout { ctx.layout }
 
-    public static let fullDiskAccessURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
     static let questionCount = 6
 
     public init(context: SetupContext, options: SetupOptions = SetupOptions()) {
@@ -166,17 +154,23 @@ public final class SetupFlow {
         }
         console.line("  Saved \(PathDisplay.tilde(layout.paths.config, home: layout.home)).")
 
-        // Permissions
-        let access = try verifyAccess(source: source, destination: destination)
+        // Folder access: native folder dialogs, then a check as the background app itself.
+        guard let access = try grantAndVerify(source: source, destination: destination, configStore: configStore) else {
+            console.line("")
+            console.line("Your settings are saved, but Ramble Flow has not started: it needs both folders.")
+            console.line("Run ./install.sh again (Enter keeps every answer) to show the folder dialog again.")
+            return 1
+        }
+        let finalDestination = access.destination
 
         // Background process
         try configStore.update { $0.setupCompleted = true }
         try startAgent()
-        await reportActivation(previous: activation, sourceReady: access?.source == .ok)
+        await reportActivation(previous: activation)
 
         console.line("")
-        console.line("Done. Transcripts of new recordings will appear in \(PathDisplay.tilde(destination, home: layout.home)).")
-        console.line("  Status            \(PathDisplay.tilde(layout.binary, home: layout.home)) status")
+        console.line("Done. Transcripts of new recordings will appear in \(PathDisplay.tilde(finalDestination, home: layout.home)).")
+        console.line("  Status            ./install.sh --status")
         console.line("  Log               \(PathDisplay.tilde(layout.logFile, home: layout.home))")
         console.line("  Change settings   ./install.sh")
         console.line("  Uninstall         ./install.sh --uninstall")
@@ -312,7 +306,7 @@ public final class SetupFlow {
         case .accessible:
             console.line("     Found.")
         case .denied:
-            console.line("     Found. macOS protects it; Full Disk Access is set up in a moment.")
+            console.line("     Found. macOS protects it; you confirm it in a macOS folder dialog in a moment.")
         case .missing, .notDirectory:
             console.line("     Not found yet. Turn on iCloud for Voice Memos on your iPhone and this Mac (same")
             console.line("     Apple Account) and open Voice Memos on the Mac once; or enter another folder.")
@@ -407,93 +401,130 @@ public final class SetupFlow {
         }
     }
 
-    // MARK: Permissions
+    // MARK: Folder access
 
-    /// Checks, as the background process, that it can list the recordings folder and write to the
-    /// transcripts folder; guides the user through Full Disk Access until it works or they skip.
-    private func verifyAccess(source: URL, destination: URL) throws -> AccessReport? {
+    struct Access {
+        var report: AccessReport
+        var source: URL
+        var destination: URL
+    }
+
+    /// Checks, as the background app, that it can list the recordings folder and write to the
+    /// transcripts folder. Whatever is missing is granted in the native folder dialog (shown by
+    /// Ramble Flow.app, already at the right folder), then checked again. Returns nil when the
+    /// user canceled or access could not be established; nothing is started then.
+    func grantAndVerify(source initialSource: URL, destination initialDestination: URL, configStore: ConfigStore) throws -> Access? {
+        var source = initialSource
+        var destination = initialDestination
         console.line("")
-        console.line("Permissions")
-        console.line("  Checking what the background process (\(PathDisplay.tilde(layout.binary, home: layout.home))) can access…")
-        var opened = false
+        console.line("Folder access")
+        console.line("  Checking what Ramble Flow can access in the background…")
+        var dialogsShown = 0
         while true {
-            guard let report = ctx.verifier.verify(source: source, destination: destination) else {
-                console.line("  The check could not run through launchd. Ramble Flow will still start; see its status")
-                console.line("  with: \(PathDisplay.tilde(layout.binary, home: layout.home)) status")
+            guard let report = ctx.verifier.verify() else {
+                console.line("  The check could not run through launchd (see ./install.sh --status and the log).")
                 return nil
             }
-            describe(report, destination: destination)
-            let destinationProblem = report.destination != .ok
-            if report.source != .denied {
-                if destinationProblem {
-                    console.line("  Fix the transcripts folder (or choose another one by running ./install.sh again).")
-                    console.line("  Results wait safely until it works; nothing is written anywhere else.")
-                }
-                if report.source == .missing {
-                    console.line("  Ramble Flow starts watching as soon as the recordings folder appears.")
-                }
-                return report
+            describe(report)
+            if report.allOK {
+                return Access(report: report, source: source, destination: destination)
             }
-
+            if report.source == .missing {
+                console.line("  The recordings folder does not exist. Turn on iCloud for Voice Memos on your iPhone and")
+                console.line("  this Mac (same Apple Account) and open Voice Memos on the Mac once.")
+                return nil
+            }
+            if report.destination == .missing && !PathProbe.isDirectory(destination.deletingLastPathComponent()) {
+                console.line("  The transcripts folder and its parent are not there (is Google Drive running, or the disk")
+                console.line("  connected?). Fix that, or choose another folder.")
+                return nil
+            }
+            let needSource = report.source != .ok
+            let needDestination = report.destination != .ok
+            if dialogsShown > 0 {
+                console.line("  Access still does not work for the folder(s) above.")
+                let answer = try ask("  Press Enter to show the dialog again, or q to stop", default: nil).lowercased()
+                if answer == "q" || answer == "quit" { return nil }
+            }
+            let count = (needSource ? 1 : 0) + (needDestination ? 1 : 0)
             console.line("")
-            console.line("  macOS lets a program read the Voice Memos folder only with Full Disk Access. Grant it to")
-            console.line("  exactly one program, the background process. It only reads the recordings folder you chose")
-            console.line("  and writes only to your transcripts folder. No other permission is needed.")
-            if options.binaryChanged {
-                console.line("  This build is new, and macOS ties the permission to the exact build: if an older")
-                console.line("  \"\(Product.binaryName)\" entry is in the list, remove it with the − button first, then add it again.")
+            console.line(count == 2
+                ? "  Ramble Flow now shows two standard macOS folder dialogs, one after the other, each already"
+                : "  Ramble Flow now shows a standard macOS folder dialog, already")
+            console.line(count == 2
+                ? "  showing the right folder. In each, click Grant Access."
+                : "  showing the right folder. Click Grant Access.")
+            if needSource { console.line("    1. \(PathDisplay.tilde(source, home: layout.home))  (read only)") }
+            if needDestination {
+                let shown = PathProbe.isDirectory(destination) ? destination : destination.deletingLastPathComponent()
+                var line = "    \(needSource ? 2 : 1). \(PathDisplay.tilde(shown, home: layout.home))"
+                if shown != destination { line += "  (a \"\(destination.lastPathComponent)\" folder is created inside)" }
+                console.line(line)
             }
-            if !opened {
-                console.line("  1. Opening System Settings › Privacy & Security › Full Disk Access.")
-                ctx.open([Self.fullDiskAccessURL])
-                console.line("  2. Showing \(Product.binaryName) in Finder. Drag it into the list, or click +, press ⌘⇧G, paste")
-                console.line("     \(layout.binary.path)")
-                console.line("     and click Open. macOS asks for your password.")
-                ctx.open(["-R", layout.binary.path])
-                console.line("  3. Make sure the switch next to \(Product.binaryName) is on.")
-                opened = true
-            } else {
-                console.line("  Still no access. In Full Disk Access, check that \(Product.binaryName) is listed and switched on.")
-                console.line("  (o = open System Settings and Finder again)")
+            console.line("  Waiting for the dialog…")
+            dialogsShown += 1
+            guard let outcome = ctx.granter.requestGrants(source: needSource ? source : nil, destination: needDestination ? destination : nil) else {
+                console.line("  The folder dialog did not answer.")
+                return nil
             }
-            while true {
-                let answer = try ask("  Press Enter to check again, or s to skip for now", default: nil).lowercased()
-                if answer.isEmpty { break }
-                if answer == "s" || answer == "skip" {
-                    console.line("  Skipped. Ramble Flow starts and waits for access; nothing is uploaded until then.")
-                    console.line("  Run ./install.sh again after granting it.")
-                    return report
+            for (answer, label) in [(outcome.source, "Recordings folder "), (outcome.destination, "Transcripts folder")] {
+                guard let answer else { continue }
+                switch answer.status {
+                case .granted:
+                    var line = "    \(label)   granted"
+                    if answer.created, let path = answer.path { line += " (created \(PathDisplay.tilde(URL(fileURLWithPath: path), home: layout.home)))" }
+                    console.line(line)
+                case .canceled:
+                    console.line("    \(label)   canceled")
+                    console.line("  You canceled the folder dialog, so nothing is uploaded and nothing was started.")
+                    return nil
+                case .failed:
+                    console.line("    \(label)   could not be saved (\(answer.detail ?? "unknown error"))")
+                    return nil
                 }
-                if answer == "o" {
-                    ctx.open([Self.fullDiskAccessURL])
-                    ctx.open(["-R", layout.binary.path])
-                    continue
-                }
-                console.line("  Press Enter, s or o.")
             }
-            console.line("  Checking again…")
+            // The user may have chosen another folder than the one proposed.
+            if let path = outcome.source?.path, outcome.source?.status == .granted, !GrantedFolders.samePath(path, source.path) {
+                source = URL(fileURLWithPath: path, isDirectory: true)
+                console.line("  Recordings folder is now \(PathDisplay.tilde(source, home: layout.home)).")
+                if !VoiceMemosSource.looksLikeRecordingsFolder(source) {
+                    console.line("  Note: it does not look like a Voice Memos folder; new audio files in it will be uploaded.")
+                }
+            }
+            if let path = outcome.destination?.path, outcome.destination?.status == .granted, !GrantedFolders.samePath(path, destination.path) {
+                destination = URL(fileURLWithPath: path, isDirectory: true)
+                console.line("  Transcripts folder is now \(PathDisplay.tilde(destination, home: layout.home)).")
+            }
+            let (finalSource, finalDestination) = (source, destination)
+            try configStore.update {
+                $0.sourcePath = finalSource.path
+                $0.destinationPath = finalDestination.path
+            }
+            console.line("  Checking again as the background app…")
         }
     }
 
-    private func describe(_ report: AccessReport, destination: URL) {
+    private func describe(_ report: AccessReport) {
         switch report.source {
         case .ok:
             let count = report.recordings ?? 0
             console.line("    Recordings folder    ok (\(count) recording\(count == 1 ? "" : "s") there now; none of them will be uploaded)")
+        case .notGranted:
+            console.line("    Recordings folder    not granted yet")
         case .denied:
-            console.line("    Recordings folder    not permitted (macOS privacy protection)")
+            console.line("    Recordings folder    no longer granted (the grant is not valid for this build)")
         case .missing:
             console.line("    Recordings folder    not found")
         }
         switch report.destination {
         case .ok:
-            console.line("    Transcripts folder   ok\(report.destinationCreated ? " (created \(PathDisplay.tilde(destination, home: layout.home)))" : "")")
+            console.line("    Transcripts folder   ok")
+        case .notGranted:
+            console.line("    Transcripts folder   not granted yet")
         case .denied:
-            console.line("    Transcripts folder   not permitted (if macOS asked about access to files, allow it)")
+            console.line("    Transcripts folder   not writable with the current grant")
         case .missing:
-            console.line("    Transcripts folder   not found (is the drive connected / Google Drive running?)")
-        case .notWritable:
-            console.line("    Transcripts folder   not writable")
+            console.line("    Transcripts folder   not found")
         }
     }
 
@@ -538,14 +569,9 @@ public final class SetupFlow {
         return (try? store.activation()) ?? nil
     }
 
-    private func reportActivation(previous: ActivationInfo?, sourceReady: Bool) async {
+    private func reportActivation(previous: ActivationInfo?) async {
         if let previous {
             console.line("  Watching for recordings made after \(Self.displayDate(previous.cutoff)) (kept from the first setup).")
-            return
-        }
-        guard sourceReady else {
-            console.line("  It starts watching once it can read the recordings folder; recordings made before that")
-            console.line("  moment are never uploaded.")
             return
         }
         let deadline = Date().addingTimeInterval(ctx.activationTimeout)
@@ -556,7 +582,7 @@ public final class SetupFlow {
             }
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
-        console.line("  It has not confirmed the start yet; check with: \(PathDisplay.tilde(layout.binary, home: layout.home)) status")
+        console.line("  It has not confirmed the start yet; check with: ./install.sh --status")
     }
 
     // MARK: Helpers

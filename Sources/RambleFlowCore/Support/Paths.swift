@@ -32,6 +32,10 @@ public struct AppPaths: Sendable {
     public var config: URL { root.appendingPathComponent("config.json") }
     /// API keys, plaintext, mode 0600. See `KeyFileStore`.
     public var secrets: URL { root.appendingPathComponent("secrets.env") }
+    /// The folder grants (security-scoped bookmarks made by the Ramble Flow app).
+    public var grants: URL { root.appendingPathComponent("grants.json") }
+    /// Answer of the folder dialog, read by the installer.
+    public var grantResult: URL { root.appendingPathComponent("grant-result.json") }
     /// Last status written by the background process, for `ramble-flow status`.
     public var status: URL { root.appendingPathComponent("status.json") }
     public var work: URL { root.appendingPathComponent("Work", isDirectory: true) }
@@ -54,7 +58,7 @@ public struct AppPaths: Sendable {
 
 /// What a path looks like from this process: present and readable, present but refused, or absent.
 /// The distinction matters: "not found" must never be reported when access was merely denied
-/// (macOS privacy protection answers `EPERM` for the Voice Memos folder without Full Disk Access).
+/// (the App Sandbox and macOS privacy protection answer `EPERM` for a folder that was not granted).
 public enum PathStatus: String, Codable, Sendable, Equatable {
     case accessible
     case denied
@@ -96,10 +100,20 @@ public enum PathProbe {
 public enum PathDisplay {
     /// `~/…` for paths in the home folder.
     public static func tilde(_ url: URL, home: URL = RealHome.url) -> String {
+        // "/private/var/…" and "/var/…" name the same place; standardizing removes "/private" only
+        // for paths that exist, so compare both spellings.
+        func spellings(_ u: URL) -> [String] {
+            let p = u.standardizedFileURL.path
+            if p.hasPrefix("/private/") { return [p, String(p.dropFirst(8))] }
+            return [p, "/private" + p]
+        }
         let path = url.standardizedFileURL.path
-        let homePath = home.standardizedFileURL.path
-        if path == homePath { return "~" }
-        if path.hasPrefix(homePath + "/") { return "~" + path.dropFirst(homePath.count) }
+        for homePath in spellings(home) {
+            for candidate in spellings(url) {
+                if candidate == homePath { return "~" }
+                if candidate.hasPrefix(homePath + "/") { return "~" + candidate.dropFirst(homePath.count) }
+            }
+        }
         return path
     }
 

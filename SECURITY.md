@@ -25,14 +25,17 @@ transcripts in a report.
 
 - The key is sent only in the `Authorization` header to the fixed HTTPS host of the provider you
   chose (`api.groq.com` or `api.openai.com`). There is no configurable base URL.
-- The program is not sandboxed. It needs Full Disk Access, which macOS grants per program: it
-  reads only the recordings folder you chose (never writing there) and writes only to your
-  transcripts folder and its own folders in `~/Library`.
+- The background app runs in the App Sandbox. It reaches the recordings folder (read-only bookmark)
+  and the transcripts folder only through the grants you give in the macOS folder dialog, plus its
+  own data and log folders (a sandbox exception). It never needs Full Disk Access. The
+  command-line tool inside the bundle (`ramble-flow`) is not sandboxed. It only runs when you start
+  it (setup, status) and never touches recordings.
 - Provider error messages are not stored or shown (only machine-readable codes), because they can
   echo key fragments. Log lines pass through a redactor as a second line of defense.
 - Builds with `-DRAMBLE_FLOW_TEST_HOOKS` (used only by `scripts/e2e.sh`) can talk to a loopback
-  mock server. They refuse to run unless the LaunchAgent label contains `.test`, so they cannot
-  replace a real installation. `./install.sh` never builds this variant unless
+  mock server and can record folder grants without a dialog (via a test-only helper). They use their
+  own bundle id (`….test`) and refuse to run unless the LaunchAgent label contains `.test`, so they
+  cannot replace a real installation or share its grants. `./install.sh` never builds this variant unless
   `RAMBLE_FLOW_TEST_HOOKS=1` is set.
 - Local builds are signed ad hoc (no publisher identity). There is no auto-updater: updates are
   `git pull` and `./install.sh`.

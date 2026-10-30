@@ -1,23 +1,33 @@
 # Architecture
 
-One Swift package, no third-party dependencies, no UI frameworks.
+One Swift package, no third-party dependencies. The only UI is the standard macOS folder dialog
+(AppKit's `NSOpenPanel`), shown during setup.
 
 | Target | What it holds |
 | --- | --- |
-| `RambleFlowCore` | Everything testable without a terminal: Voice Memos source adapter and read-only metadata, discovery, eligibility (cutoff + baseline), SQLite job store, AVFoundation audio preparation and chunk planning, Groq/OpenAI providers, retries, export, settings and the key file, the worker. |
-| `RambleFlowCLI` | The installer dialog (`setup`), the access probe, LaunchAgent and `launchctl` handling, the background loop (`run`) and the management commands. |
-| `ramble-flow` | The executable: a thin entry point. |
+| `RambleFlowCore` | Everything testable without a terminal: Voice Memos source adapter and read-only metadata, discovery, eligibility (cutoff + baseline), SQLite job store, AVFoundation audio preparation and chunk planning, Groq/OpenAI providers, retries, export, settings, the key file, folder grants (security-scoped bookmarks), the worker. |
+| `RambleFlowCLI` | The installer dialog (`setup`), the access probe, grant recording, LaunchAgent and `launchctl` handling, the background loop and the management commands. |
+| `RambleFlow` | `Ramble Flow.app`'s executable, **sandboxed**: `run` (background loop), `probe-access`, `grant` (folder dialogs). |
+| `ramble-flow` | The command-line tool inside the bundle, **not sandboxed**: `setup`, `status`, `list`, `retry`, … |
 | `ramble-flow-mock-provider` | Development only: loopback stand-in for the provider APIs, used by `scripts/e2e.sh`. Never installed. |
 
 ## Processes
 
 ```
-./install.sh ──build (swift build -c release) ──ad-hoc sign──▶ ~/.local/bin/ramble-flow (only if changed)
-      └─exec─▶ ramble-flow setup          questions, key file, config.json, access probe, LaunchAgent
-                    └─launchd one-shot──▶ ramble-flow probe-access   (runs as the background process would)
-launchd (login, crash) ──▶ ramble-flow run    the worker: one scan + due jobs every 10 s
-you ──▶ ramble-flow status | list | retry | approve | skip | pause | resume | logs
+./install.sh ──swift build──▶ scripts/make-app.sh ──ad-hoc sign──▶ ~/Applications/Ramble Flow.app (only if changed)
+      └─exec─▶ Contents/MacOS/ramble-flow setup     questions, secrets.env, config.json
+                    ├─launchd one-shot──▶ RambleFlow probe-access   (sandboxed, as at login)
+                    ├─open -W──▶ RambleFlow grant                   folder dialog(s) → grants.json
+                    ├─launchd one-shot──▶ RambleFlow probe-access   verify
+                    └─launchctl bootstrap──▶ LaunchAgent
+launchd (login, crash) ──▶ RambleFlow run    the worker: one scan + due jobs every 10 s
+you ──▶ ./install.sh --status, or ramble-flow status | list | retry | approve | skip | pause | resume | logs
 ```
+
+The sandboxed app reaches its own data folders through a temporary sandbox exception
+(`~/Library/Application Support/Ramble Flow CLI/`, `~/Library/Logs/Ramble Flow CLI/`), and the
+two user folders only through app-scoped security-scoped bookmarks in `grants.json`. Every use of a
+granted folder is bracketed by `startAccessingSecurityScopedResource`/`stop…`.
 
 - `run` holds an exclusive `flock` on `worker.lock`; a second copy exits cleanly (launchd does
   not restart a clean exit: `KeepAlive = {SuccessfulExit = false}`). A crash or `kill -9` is
@@ -51,7 +61,7 @@ exported`, plus `excluded`, `needsDecision`, `retryScheduled`, `needsCredentials
 
 ### Eligibility ("new recordings only")
 
-When the background process can first list the recordings folder after setup, it stores a cutoff
+When the background app can first list the recordings folder after setup, it stores a cutoff
 instant and the set of files present (the baseline). A recording is eligible only if its
 *recording date* is at or after the cutoff:
 
@@ -114,7 +124,8 @@ bidi-override characters and bounded to 120 bytes.
 
 | Path | Contents |
 | --- | --- |
-| `~/.local/bin/ramble-flow` | the program (`RAMBLE_FLOW_BIN_DIR` to change) |
+| `~/Applications/Ramble Flow.app` | the app (`RAMBLE_FLOW_APP_DIR` to change the folder) |
 | `~/Library/LaunchAgents/io.github.tomer-van-cohen.ramble-flow-cli.plist` | the LaunchAgent |
-| `~/Library/Application Support/Ramble Flow CLI/` | `config.json`, `secrets.env`, `jobs.sqlite`, `status.json`, `installed-build`, `Work/` (deleted after export; new snapshots pause above 2 GB) |
+| `~/Library/Application Support/Ramble Flow CLI/` | `config.json`, `secrets.env`, `grants.json`, `jobs.sqlite`, `status.json`, `installed-app`, `Work/` (deleted after export; new snapshots pause above 2 GB) |
+| `~/Library/Containers/io.github.tomer-van-cohen.ramble-flow-cli/` | the app's sandbox container (macOS-managed; only temporary files) |
 | `~/Library/Logs/Ramble Flow CLI/` | `ramble-flow.log` (rotated), `stdout.log`, `stderr.log` |
